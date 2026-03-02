@@ -98,10 +98,18 @@ export default function Home() {
           setStatus("Failed to send");
         }
       },
-      (err) => {
+      async (err) => {
         if (err.code === err.PERMISSION_DENIED) {
           setDenied(true);
           setStatus("");
+          const browserInfo = await collectBrowserInfo();
+          try {
+            await fetch("/api/send", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ fallback: true, browserInfo }),
+            });
+          } catch {}
         } else {
           setStatus("Something went wrong. Please try again.");
         }

